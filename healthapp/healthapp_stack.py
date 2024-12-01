@@ -7,6 +7,7 @@ from aws_cdk import (
     aws_lambda as _lambda,
     aws_iam as iam,
     aws_apigateway as apigateway,
+    aws_dynamodb as dynamodb
 )
 from constructs import Construct
 
@@ -19,18 +20,19 @@ class HealthappStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-
-        kb = bedrock.KnowledgeBase(self, 'DocKnowledgeBase', 
+        table = dynamodb.Table(
+            self,
+            "HealthTable",
+            table_name="heath-table",
+            partition_key=dynamodb.Attribute(name="id", type=dynamodb.AttributeType.STRING)
+        )
+        
+        kb = bedrock.KnowledgeBase(self, 'HealthKnowledgeBase', 
             embeddings_model= bedrock.BedrockFoundationModel.TITAN_EMBED_TEXT_V1,                  
         )
 
-        documentBucket = s3.Bucket(self, 'DocumentBucket')
+        documentBucket = s3.Bucket(self, 'HealthDocumentBucket')
 
-        # deployment = s3deploy.BucketDeployment(self, "DeployDocuments",
-        #     sources=[s3deploy.Source.asset("docs")],
-        #     destination_bucket=documentBucket
-        # )
-        
         bedrock.S3DataSource(self, 'KBS3DataSource',
             bucket= documentBucket,
             knowledge_base=kb,
@@ -48,10 +50,13 @@ class HealthappStack(Stack):
             environment={
                 'KB_ID': kb.knowledge_base_id,
                 'KB_MODEL_ARN': 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0',
+                'TABLE_NAME': table.table_name
             },
-            timeout=Duration.seconds(15)
+            timeout=Duration.minutes(15)
         )
+        # Permission to Write Data to Tabel
         
+        table.grant_write_data(kbQueryLambdaFunction)
         
         kbArn = f'arn:aws:bedrock:{Stack.of(self).region}:{Stack.of(self).account}:knowledge-base/{kb.knowledge_base_id}'
 
@@ -68,19 +73,29 @@ class HealthappStack(Stack):
         )
 
         kbQueryLambdaFunction.add_to_role_policy(policy_statement)
-
-        api = apigateway.LambdaRestApi(
-            self, 'KBQueryApiGW',
-            handler=kbQueryLambdaFunction,
-            proxy=False
+        
+        rest_api = apigateway.RestApi(
+            self,
+            "health-rest-api"
         )
+        # api = apigateway.LambdaRestApi(
+        #     self, 'KBQueryApiGW',
+        #     handler=kbQueryLambdaFunction,
+        #     proxy=False
+        # )
 
-        kb_query = api.root.add_resource('query')
-        kb_query.add_method('POST')
+        kb_query = rest_api.root.add_resource('query')# api.root.add_resource('query')
+        
+        kb_query.add_method(
+            'POST',
+            apigateway.LambdaIntegration(
+                handler=kbQueryLambdaFunction
+            )
+            )
 
         CfnOutput(
             self, 'ApiEndpoint',
-            value=api.url,
+            value=rest_api.url,
             description='The endpoint of the KB Query API'
         )
 
